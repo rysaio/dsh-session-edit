@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="编辑分页">
+  <rect x="6" y="10" width="52" height="36" rx="8" fill="none" stroke="#247bbf" stroke-width="4"/>
+  <path d="M20 22h24M20 32h14" stroke="#247bbf" stroke-width="4" stroke-linecap="round"/>
+  <path d="M40 50l10-10 6 6-10 10-8 2z" fill="#247bbf"/>
+</svg>

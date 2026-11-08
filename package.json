@@ -1,0 +1,35 @@
+{
+  "name": "dsh-edit-page",
+  "version": "0.1.0",
+  "description": "DSH 会话内编辑分页：就地改写模型可见的思考、回复与工具调用，投影实时生效。",
+  "type": "module",
+  "license": "MIT",
+  "author": "rysaio",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rysaio/dsh-edit-page.git"
+  },
+  "homepage": "https://github.com/rysaio/dsh-edit-page#readme",
+  "bugs": {
+    "url": "https://github.com/rysaio/dsh-edit-page/issues"
+  },
+  "keywords": ["dsh", "deepseek-harness", "cordis", "plugin", "session", "edit"],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "icon.svg"],
+  "scripts": {
+    "test": "node project.test.mjs"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+    }
+  }
+}
