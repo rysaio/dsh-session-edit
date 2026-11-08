@@ -1,4 +1,4 @@
 - insert:
     - id: edit-page
-      name: dsh-edit-page
+      name: dsh-session-edit
       inject: [webServer, sessions, agents, sessionController]

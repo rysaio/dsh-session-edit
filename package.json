@@ -1,5 +1,5 @@
 {
-  "name": "dsh-edit-page",
+  "name": "dsh-session-edit",
   "version": "0.1.0",
   "description": "DSH 会话内编辑分页：就地改写模型可见的思考、回复与工具调用，投影实时生效。",
   "type": "module",
@@ -7,11 +7,11 @@
   "author": "rysaio",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rysaio/dsh-edit-page.git"
+    "url": "git+https://github.com/rysaio/dsh-session-edit.git"
   },
-  "homepage": "https://github.com/rysaio/dsh-edit-page#readme",
+  "homepage": "https://github.com/rysaio/dsh-session-edit#readme",
   "bugs": {
-    "url": "https://github.com/rysaio/dsh-edit-page/issues"
+    "url": "https://github.com/rysaio/dsh-session-edit/issues"
   },
   "keywords": ["dsh", "deepseek-harness", "cordis", "plugin", "session", "edit"],
   "exports": {

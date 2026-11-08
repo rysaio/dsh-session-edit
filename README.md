@@ -1,4 +1,4 @@
-# dsh-edit-page
+# dsh-session-edit
 
 DSH 会话内的「编辑」分页：就地修改模型可见的思考、回复文字与工具调用，改完立即生效，不落盘、不弹窗、不悬浮。
 
@@ -9,7 +9,7 @@ DSH 会话内的「编辑」分页：就地修改模型可见的思考、回复�
 1. 装进 profile 依赖：
 
    ```sh
-   pnpm add github:rysaio/dsh-edit-page
+   pnpm add github:rysaio/dsh-session-edit
    ```
 
    本地开发直接链到工作副本：
@@ -18,12 +18,12 @@ DSH 会话内的「编辑」分页：就地修改模型可见的思考、回复�
    pnpm add link:<本仓库路径>
    ```
 
-2. 在 profile `package.json` 的 `dsh.profile.bundles` 数组末尾加上 `"dsh-edit-page"`，保留原有项：
+2. 在 profile `package.json` 的 `dsh.profile.bundles` 数组末尾加上 `"dsh-session-edit"`，保留原有项：
 
    ```json
    "dsh": {
      "profile": {
-       "bundles": ["...原有项", "dsh-edit-page"]
+       "bundles": ["...原有项", "dsh-session-edit"]
      }
    }
    ```

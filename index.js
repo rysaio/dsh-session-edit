@@ -1,4 +1,4 @@
-// dsh-edit-page — Host half.
+// dsh-session-edit — Host half.
 //
 // 编辑只写「投影事件」：原始 assistant/message 一字不动，插件在折叠历史时
 // 把目标块替换成编辑后的文本。因此
@@ -11,7 +11,7 @@
 
 import { createRequire } from 'node:module'
 
-export const name = 'dsh-edit-page'
+export const name = 'dsh-session-edit'
 export const inject = ['webServer', 'sessions', 'agents', 'sessionController']
 
 /** 本插件写入的会话记录类型。 */

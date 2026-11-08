@@ -1,10 +1,10 @@
-// dsh-edit-page — Client half.
+// dsh-session-edit — Client half.
 //
 // 会话内的「编辑」标签页：只显示用户输入、模型思考与回复文字（工具结果不展示），
 // 就地编辑、就地保存。没有浮动按钮，也没有弹出编辑窗口。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-edit-page',
+  id: 'dsh-session-edit',
   factory(require) {
     const React = require('react')
     const h = React.createElement
