@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useCallback, useEffect, useRef, useState } = React
+    const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     const LABEL = '编辑'
     const VIEW_ID = 'edit-page'
@@ -75,7 +75,6 @@ window.__ModuleLoader__.load({
     const S = {
       root: {
         height: '100%',
-        overflowY: 'auto',
         background: 'var(--dsw-alias-bg-base, transparent)',
         color: 'var(--dsw-alias-label-primary, inherit)',
       },
@@ -87,6 +86,38 @@ window.__ModuleLoader__.load({
       },
       title: { fontSize: '13px', fontWeight: 600 },
       hint: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary, #888)' },
+      searchAnchor: {
+        position: 'sticky', top: '8px', zIndex: 3,
+        height: 0, display: 'flex', alignItems: 'flex-start',
+        justifyContent: 'flex-end',
+        pointerEvents: 'none',
+      },
+      searchBar: {
+        pointerEvents: 'auto',
+        display: 'flex', alignItems: 'center', gap: '4px',
+        padding: '5px 8px', borderRadius: '8px',
+        maxWidth: '100%', boxSizing: 'border-box',
+        background: 'var(--dsw-alias-bg-layer-1, rgba(255,255,255,.96))',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+        boxShadow: '0 4px 14px rgba(0,0,0,.18)',
+        backdropFilter: 'blur(6px)',
+      },
+      searchInput: {
+        width: '220px', minWidth: '80px', flexShrink: 1, boxSizing: 'border-box',
+        background: 'var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06))',
+        color: 'var(--dsw-alias-label-primary, inherit)',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+        borderRadius: '6px', padding: '5px 9px',
+        font: 'inherit', fontSize: '12px', outline: 'none',
+      },
+      searchCount: {
+        fontSize: '10.5px', color: 'var(--dsw-alias-label-secondary, #888)',
+        minWidth: '40px', textAlign: 'center',
+      },
+      fieldHit: {
+        outline: '2px solid var(--dsw-alias-brand-primary, #247bbf)',
+        outlineOffset: '1px',
+      },
       spacer: { flex: 1 },
       action: {
         appearance: 'none', border: 'none', background: 'none', padding: '2px 4px',
@@ -370,7 +401,7 @@ window.__ModuleLoader__.load({
       const {
         entry, segments, expanded, onToggle, busy, locked, originals, onToggleOriginal, onRestore,
         onFork, confirmFork, drafts, onDraft, onSaveBlock, callDrafts, onCallDraft, onSaveCall,
-        errors, entryRef, canJump, onJump,
+        errors, entryRef, canJump, onJump, registerField, highlightKey,
       } = props
 
       if (entry.role === 'user') {
@@ -538,8 +569,10 @@ window.__ModuleLoader__.load({
           dirty ? h('span', { style: S.meta }, '未保存') : null,
           error ? h('span', { style: S.blockError }, error) : null,
         )
+        const fieldStyle = block.kind === 'reasoning' ? S.fieldSmall : S.field
         const field = h('textarea', {
-          style: block.kind === 'reasoning' ? S.fieldSmall : S.field,
+          ref: node => registerField(key, node),
+          style: key === highlightKey ? { ...fieldStyle, ...S.fieldHit } : fieldStyle,
           value: draft,
           spellCheck: false,
           disabled: locked,
@@ -628,8 +661,15 @@ window.__ModuleLoader__.load({
       const [blockErrors, setBlockErrors] = useState(() => new Map())
       const [pendingStart, setPendingStart] = useState(null)
       const [confirmFork, setConfirmFork] = useState(null)
+      const [searchOpen, setSearchOpen] = useState(false)
+      const [query, setQuery] = useState('')
+      const [matchIndex, setMatchIndex] = useState(0)
+      const [highlightKey, setHighlightKey] = useState(null)
+      const [pendingJump, setPendingJump] = useState(null)
       const rootRef = useRef(null)
       const scrollPortRef = useRef(null)
+      const fieldRefs = useRef(new Map())
+      const searchInputRef = useRef(null)
       const refs = useRef(new Map())
       const alive = useRef(true)
       const scrolled = useRef(false)
@@ -655,6 +695,72 @@ window.__ModuleLoader__.load({
         if (anchor !== null) anchorRef.current = anchor
       }, [])
 
+      // 检索可编辑的回复与思考（含未保存草稿）；大小写不敏感，最多 500 条。
+      const matches = useMemo(() => {
+        if (data === null || query === '') return []
+        const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+        const found = []
+        for (const entry of data.entries) {
+          if (entry.role !== 'assistant') continue
+          for (const block of entry.blocks) {
+            if (block.kind !== 'text' && block.kind !== 'reasoning') continue
+            const key = blockKey(entry.seq, block.blockIndex)
+            const text = drafts.get(key) ?? block.text
+            pattern.lastIndex = 0
+            let hit
+            while ((hit = pattern.exec(text)) !== null) {
+              found.push({
+                key,
+                seq: entry.seq,
+                blockIndex: block.blockIndex,
+                kind: block.kind,
+                start: hit.index,
+                length: hit[0].length,
+              })
+              if (found.length >= 500) return found
+              if (hit[0].length === 0) pattern.lastIndex += 1
+            }
+          }
+        }
+        return found
+      }, [data, drafts, query])
+
+      const currentMatch = matches.length === 0
+        ? null
+        : matches[Math.min(matchIndex, matches.length - 1)]
+
+      const registerField = useCallback((key, node) => {
+        if (node === null) fieldRefs.current.delete(key)
+        else fieldRefs.current.set(key, node)
+      }, [])
+
+      const openSearch = useCallback(() => {
+        setSearchOpen(true)
+        requestAnimationFrame(() => {
+          const input = searchInputRef.current
+          if (input !== null) {
+            input.focus()
+            input.select()
+          }
+        })
+      }, [])
+
+      /** 跳到一条命中：折叠的思考先展开，滚过去并选中文本。 */
+      const jumpTo = useCallback(match => {
+        if (match === null) return
+        if (match.kind === 'reasoning') {
+          setExpanded(current => (current.has(match.key) ? current : new Set(current).add(match.key)))
+        }
+        setPendingJump(match)
+      }, [])
+
+      const stepMatch = useCallback(delta => {
+        if (matches.length === 0) return
+        const at = (Math.min(matchIndex, matches.length - 1) + delta + matches.length) % matches.length
+        setMatchIndex(at)
+        jumpTo(matches[at])
+      }, [jumpTo, matchIndex, matches])
+
       useEffect(() => {
         const port = scrollPortOf(rootRef.current)
         scrollPortRef.current = port
@@ -678,7 +784,7 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         const frame = requestAnimationFrame(captureAnchor)
         return () => cancelAnimationFrame(frame)
-      }, [captureAnchor, data, expanded, originals, status])
+      }, [captureAnchor, data, expanded, originals, status, searchOpen])
 
       useEffect(() => () => {
         alive.current = false
@@ -860,6 +966,67 @@ window.__ModuleLoader__.load({
         window.addEventListener('focus', onFocus)
         return () => window.removeEventListener('focus', onFocus)
       }, [busy, load])
+
+      // 输入变化回到第一条命中。
+      useEffect(() => {
+        setMatchIndex(0)
+      }, [query])
+
+      // 高亮当前命中并滚到它；不抢输入框焦点，打字不会断。
+      useEffect(() => {
+        if (currentMatch === null) {
+          setHighlightKey(null)
+          return undefined
+        }
+        setHighlightKey(currentMatch.key)
+        const timer = setTimeout(() => {
+          // 只有还在检索框里打字时才自动滚；跳进编辑框后就别抢滚动。
+          if (document.activeElement !== searchInputRef.current) return
+          const node = fieldRefs.current.get(currentMatch.key)
+          if (node !== undefined) node.scrollIntoView({ block: 'center' })
+        }, 120)
+        return () => clearTimeout(timer)
+      }, [currentMatch?.key, currentMatch?.start])
+
+      // 显式跳转：滚到这条并选中命中文本，焦点交给编辑框。
+      useEffect(() => {
+        if (pendingJump === null) return
+        const node = fieldRefs.current.get(pendingJump.key)
+        if (node === undefined) return
+        setPendingJump(null)
+        node.scrollIntoView({ block: 'center' })
+        if (node.disabled) return
+        node.focus()
+        node.setSelectionRange(pendingJump.start, pendingJump.start + pendingJump.length)
+      }, [pendingJump, data, expanded])
+
+      useEffect(() => {
+        if (searchOpen) return
+        setHighlightKey(null)
+      }, [searchOpen])
+
+      // Ctrl+F 开检索，F3 / Shift+F3 上下跳，Esc 关闭。
+      useEffect(() => {
+        const onKeyDown = event => {
+          if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
+            && event.key.toLowerCase() === 'f') {
+            event.preventDefault()
+            openSearch()
+            return
+          }
+          if (event.key === 'F3' && searchOpen) {
+            event.preventDefault()
+            stepMatch(event.shiftKey ? -1 : 1)
+            return
+          }
+          if (event.key === 'Escape' && searchOpen) {
+            event.preventDefault()
+            setSearchOpen(false)
+          }
+        }
+        window.addEventListener('keydown', onKeyDown, true)
+        return () => window.removeEventListener('keydown', onKeyDown, true)
+      }, [openSearch, searchOpen, stepMatch])
 
       const toggle = key => {
         setExpanded(current => {
@@ -1108,9 +1275,49 @@ window.__ModuleLoader__.load({
             h('span', { style: S.spacer }),
             entries.length > 0 ? h('span', { style: S.meta }, `已载入 ${entries.length} 条`) : null,
             data?.running ? h('span', { style: { ...S.meta, color: 'var(--dsw-alias-state-warn-primary, #b8860b)' } }, '运行中') : null,
+            h('button', {
+              type: 'button', style: S.action,
+              onClick: () => (searchOpen ? setSearchOpen(false) : openSearch()),
+            }, '检索'),
             h('button', { type: 'button', style: S.action, onClick: () => load(false) }, '刷新'),
             lastAssistant ? h('button', { type: 'button', style: S.action, onClick: () => jump(lastAssistant.seq) }, '最新 ↓') : null,
           ),
+
+          searchOpen
+            ? h('div', { style: S.searchAnchor },
+              h('div', { style: S.searchBar },
+                h('input', {
+                  ref: searchInputRef,
+                  style: S.searchInput,
+                  value: query,
+                  placeholder: '检索文字与思考（Enter 跳到当前，F3 下一个）',
+                  spellCheck: false,
+                  'aria-label': '检索',
+                  onChange: event => setQuery(event.target.value),
+                  onKeyDown: event => {
+                    if (event.key !== 'Enter') return
+                    event.preventDefault()
+                    if (event.shiftKey) stepMatch(-1)
+                    else jumpTo(currentMatch)
+                  },
+                }),
+                h('span', { style: S.searchCount }, query === ''
+                  ? ''
+                  : matches.length === 0
+                    ? '无匹配'
+                    : `${Math.min(matchIndex, matches.length - 1) + 1}/${matches.length}`),
+                h('button', {
+                  type: 'button', style: S.action, disabled: matches.length === 0,
+                  onClick: () => stepMatch(-1), title: '上一个匹配（Shift+F3）',
+                }, '上一个'),
+                h('button', {
+                  type: 'button', style: S.action, disabled: matches.length === 0,
+                  onClick: () => stepMatch(1), title: '下一个匹配（F3）',
+                }, '下一个'),
+                h('button', { type: 'button', style: S.action, onClick: () => setSearchOpen(false) }, '关闭'),
+              ),
+            )
+            : null,
 
           status === 'loading' ? h('div', { style: S.empty }, '载入中…') : null,
           status === 'error'
@@ -1154,6 +1361,8 @@ window.__ModuleLoader__.load({
               drafts,
               onDraft: setDraft,
               onSaveBlock: saveBlock,
+              registerField,
+              highlightKey,
               callDrafts,
               onCallDraft: setCallDraft,
               onSaveCall: saveCall,
