@@ -10,6 +10,7 @@
 // 会静默跳过，不会让会话打不开。
 
 import { createRequire } from 'node:module'
+import { registerEditTools } from './tools.js'
 
 export const name = 'dsh-session-edit'
 export const inject = ['webServer', 'sessions', 'agents', 'sessionController']
@@ -280,7 +281,10 @@ function collect(session) {
   return entries
 }
 
-function entryText(session, seq, blockIndex) {
+/** Shared with the model-facing tools. */
+export const collectEntries = collect
+
+export function entryText(session, seq, blockIndex) {
   const event = session.eventAt(seq)
   if (!event || event.type !== 'assistant/message') return null
   const message = session.deriveEventMessage(event) ?? event.data?.message
@@ -359,6 +363,12 @@ export function apply(ctx) {
 
   route('/api/edit-page/v1/fork', (req, res, services) => handleFork(services, req, res))
 
+  try {
+    registerEditTools(ctx, { collectEntries: collect, entryText, writeEdit, writeOwner, writeCreated })
+  } catch (error) {
+    ctx.logger?.warn?.(`edit-page tools: ${String(error?.message ?? error)}`)
+  }
+
   // 停用只关开关，不注销投影：注销会让用过它的会话在下一次折叠时报
   // "projection was removed"，那一轮对话就发不出去。路由则必须撤掉，
   // 否则旧闭包会继续对着已停用的上下文取服务。
@@ -370,6 +380,9 @@ export function apply(ctx) {
   }, 'edit-page routes')
 }
 
+/** 一页读取的条数上限；不传 limit 时用默认窗口。 */
+const WINDOW_LIMIT = 30
+
 function handleSession(services, req, res) {
   const url = new URL(req.url, 'http://127.0.0.1')
   const sessionId = url.searchParams.get('sessionId') ?? ''
@@ -378,6 +391,19 @@ function handleSession(services, req, res) {
   if (session === undefined) {
     return json(res, 409, { ok: false, code: 'SESSION_NOT_LIVE', error: '会话未载入，打开该会话后再试' })
   }
+  const limitParam = Number.parseInt(url.searchParams.get('limit') ?? '', 10)
+  const limit = Number.isSafeInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : WINDOW_LIMIT
+  const beforeParam = Number.parseInt(url.searchParams.get('before') ?? '', 10)
+  const before = Number.isSafeInteger(beforeParam) && beforeParam >= 0 ? beforeParam : null
+  const all = collect(session)
+  let end = all.length
+  if (before !== null) {
+    end = all.findIndex(entry => entry.seq === before)
+    if (end < 0) {
+      return json(res, 409, { ok: false, code: 'WINDOW_STALE', error: '分页位置已失效，请刷新' })
+    }
+  }
+  const start = Math.max(0, end - limit)
   const agent = services.agents.get(sessionId)
   const running = Boolean(agent && agent.status !== 'idle')
   return json(res, 200, {
@@ -387,8 +413,30 @@ function handleSession(services, req, res) {
       && services.sessions.messageProjections.some(item => item.type === RECORD_TYPE),
     sessionId,
     running,
-    entries: collect(session),
+    entries: all.slice(start, end),
+    hasMore: start > 0,
   })
+}
+
+/** Shared write path: append the projection record and wait for one flush. */
+export async function writeEdit(session, record, services) {
+  const api = hostSessionApi()
+  api.appendPluginRecord(session, RECORD_TYPE, record)
+  await services.sessions.flush(session)
+}
+
+/** Ownership record for sessions created by the model-facing create tool. */
+export async function writeOwner(session, owner, services) {
+  const api = hostSessionApi()
+  api.appendPluginRecord(session, 'plugin:edit-page/owner', { version: 1, owner })
+  await services.sessions.flush(session)
+}
+
+/** Durable list of sessions created by this caller, kept on the caller session. */
+export async function writeCreated(session, childId, services) {
+  const api = hostSessionApi()
+  api.appendPluginRecord(session, 'plugin:edit-page/created', { version: 1, sessionId: childId })
+  await services.sessions.flush(session)
 }
 
 async function handleApply(services, req, res) {
@@ -449,9 +497,7 @@ async function handleApply(services, req, res) {
   const record = kind === 'tool-call'
     ? { version: 1, seq, blockIndex, kind, name, arguments: args }
     : { version: 1, seq, blockIndex, kind, text }
-  const api = hostSessionApi()
-  api.appendPluginRecord(session, RECORD_TYPE, record)
-  await services.sessions.flush(session)
+  await writeEdit(session, record, services)
 
   const after = entryText(session, seq, blockIndex)
   return json(res, 200, {

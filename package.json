@@ -20,7 +20,7 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./icon": "./icon.svg"
   },
-  "files": ["index.js", "client.js", "cordis.patch.yml", "icon.svg"],
+  "files": ["index.js", "tools.js", "client.js", "cordis.patch.yml", "icon.svg"],
   "scripts": {
     "test": "node project.test.mjs"
   },

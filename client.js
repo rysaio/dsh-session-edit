@@ -16,6 +16,62 @@ window.__ModuleLoader__.load({
     /** 由 apply 从 Client 服务上抓下来：分叉成功后切到新会话。 */
     let openSession = null
 
+    /**
+     * 页面进程内的状态暂存：切走时收下未保存的草稿、展开状态、原文预览和
+     * 滚动位置，切回来原样还原，但不写会话、不落盘。刷新、退出应用或
+     * 停用插件时随模块一起丢掉。
+     */
+    const pageStash = new Map()
+    let stashEnabled = true
+
+    /** 草稿只收真正改过的；展开、原文预览和滚动落点整份记下。 */
+    function stashPageState(context, anchor) {
+      if (!stashEnabled || context === null) return
+      const { sessionId, data, drafts, callDrafts, expanded, originals } = context
+      if (!sessionId) return
+      // 快照还没到（切走太快）时无法判断谁改过，保留上一份暂存不动。
+      if (!Array.isArray(data?.entries)) return
+      const blocks = new Map()
+      for (const entry of data.entries) {
+        if (entry.role !== 'assistant') continue
+        for (const block of entry.blocks) {
+          blocks.set(blockKey(entry.seq, block.blockIndex), block)
+        }
+      }
+      const texts = new Map()
+      for (const [key, text] of drafts) {
+        const block = blocks.get(key)
+        if (block !== undefined && block.kind !== 'tool-call' && text !== block.text) texts.set(key, text)
+      }
+      const calls = new Map()
+      for (const [key, draft] of callDrafts) {
+        const block = blocks.get(key)
+        if (block === undefined || block.kind !== 'tool-call') continue
+        if (draft.name !== block.name || draft.arguments !== block.arguments) calls.set(key, draft)
+      }
+      pageStash.set(sessionId, {
+        drafts: texts,
+        callDrafts: calls,
+        expanded: new Set(expanded),
+        originals: new Set(originals),
+        anchorSeq: anchor?.seq ?? null,
+        anchorOffset: anchor?.offset ?? 0,
+      })
+    }
+
+    /** 视口顶部第一条仍有内容的条目，作为滚动落点。 */
+    function visibleAnchor(data, refs, port) {
+      if (port === null || !Array.isArray(data?.entries)) return null
+      const portTop = port.getBoundingClientRect().top
+      for (const entry of data.entries) {
+        const node = refs.get(entry.seq)
+        if (node === undefined) continue
+        const rect = node.getBoundingClientRect()
+        if (rect.bottom > portTop) return { seq: entry.seq, offset: rect.top - portTop }
+      }
+      return null
+    }
+
     const S = {
       root: {
         height: '100%',
@@ -197,6 +253,10 @@ window.__ModuleLoader__.load({
         padding: '40px 0', textAlign: 'center', fontSize: '11px',
         color: 'var(--dsw-alias-label-secondary, #888)',
       },
+      loadEarlier: {
+        display: 'flex', justifyContent: 'center',
+        padding: '2px 0 10px',
+      },
       noticeBar: {
         fontSize: '11px', padding: '6px 10px', marginBottom: '10px',
         borderRadius: '6px', color: 'var(--dsw-alias-label-secondary, #888)',
@@ -260,6 +320,35 @@ window.__ModuleLoader__.load({
         if ((segmentsBySeq.get(seq)?.length ?? 0) === 0) anchors.set(seq, target)
       }
       return { segmentsBySeq, anchors }
+    }
+
+    /** 一次读取/渲染的条目数；滚到顶部再往前补一页。 */
+    const WINDOW = 30
+    /** 刷新时最多往回调几页，避免异常分页把整段历史拉回来。 */
+    const MAX_WINDOWS = 20
+
+    /** 编辑页通常不是滚动容器：找真正带 overflow 的祖先（会话的滚轮体）。 */
+    function scrollPortOf(node) {
+      if (node === null) return null
+      const scrollable = element => {
+        const overflow = getComputedStyle(element).overflowY
+        return overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay'
+      }
+      if (scrollable(node) && node.scrollHeight > node.clientHeight) return node
+      let cursor = node.parentElement
+      while (cursor !== null) {
+        if (scrollable(cursor)) return cursor
+        cursor = cursor.parentElement
+      }
+      return null
+    }
+
+    /** 末尾回复：优先最后一条助手回复，没有就用最后一条。 */
+    function lastReplySeq(entries) {
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        if (entries[index].role === 'assistant') return entries[index].seq
+      }
+      return entries.length > 0 ? entries[entries.length - 1].seq : null
     }
 
     /** 折叠时只露一行：取第一段非空文本。 */
@@ -524,43 +613,123 @@ window.__ModuleLoader__.load({
 
     function EditPage(props) {
       const sessionId = props?.sessionId
+      const stashed = sessionId ? pageStash.get(sessionId) : undefined
       const [data, setData] = useState(null)
       const [status, setStatus] = useState('loading')
       const [failure, setFailure] = useState(null)
-      const [expanded, setExpanded] = useState(() => new Set())
-      const [originals, setOriginals] = useState(() => new Set())
+      const [expanded, setExpanded] = useState(() => new Set(stashed?.expanded ?? []))
+      const [originals, setOriginals] = useState(() => new Set(stashed?.originals ?? []))
       const [busy, setBusy] = useState(false)
+      const [loadingEarlier, setLoadingEarlier] = useState(false)
       const [notice, setNotice] = useState(null)
       const [entryError, setEntryError] = useState(null)
-      const [drafts, setDrafts] = useState(() => new Map())
-      const [callDrafts, setCallDrafts] = useState(() => new Map())
+      const [drafts, setDrafts] = useState(() => new Map(stashed?.drafts ?? []))
+      const [callDrafts, setCallDrafts] = useState(() => new Map(stashed?.callDrafts ?? []))
       const [blockErrors, setBlockErrors] = useState(() => new Map())
-      const [pendingScroll, setPendingScroll] = useState(null)
+      const [pendingStart, setPendingStart] = useState(null)
       const [confirmFork, setConfirmFork] = useState(null)
+      const rootRef = useRef(null)
+      const scrollPortRef = useRef(null)
       const refs = useRef(new Map())
       const alive = useRef(true)
       const scrolled = useRef(false)
       const confirmTimer = useRef(null)
+      const restoreRef = useRef(stashed
+        ? { seq: stashed.anchorSeq ?? null, offset: stashed.anchorOffset ?? 0 }
+        : null)
+      const anchorRef = useRef(stashed
+        ? { seq: stashed.anchorSeq ?? null, offset: stashed.anchorOffset ?? 0 }
+        : null)
+      const pendingRestoreRef = useRef(null)
+      const entriesRef = useRef([])
+      entriesRef.current = data?.entries ?? []
+      const sessionRef = useRef(sessionId)
+      // 只在 state 与 sessionId 同属一个会话时更新，避免切会话的一帧里把旧状态记到新会话。
+      const stashRef = useRef(null)
+      if (sessionRef.current === sessionId) {
+        stashRef.current = { sessionId, data, drafts, callDrafts, expanded, originals }
+      }
+
+      const captureAnchor = useCallback(() => {
+        const anchor = visibleAnchor(stashRef.current?.data, refs.current, scrollPortRef.current)
+        if (anchor !== null) anchorRef.current = anchor
+      }, [])
+
+      useEffect(() => {
+        const port = scrollPortOf(rootRef.current)
+        scrollPortRef.current = port
+        if (port === null) return undefined
+        let frame = 0
+        const onScroll = () => {
+          if (frame !== 0) return
+          frame = requestAnimationFrame(() => {
+            frame = 0
+            captureAnchor()
+          })
+        }
+        port.addEventListener('scroll', onScroll, { passive: true })
+        return () => {
+          if (frame !== 0) cancelAnimationFrame(frame)
+          port.removeEventListener('scroll', onScroll)
+        }
+      }, [captureAnchor])
+
+      // 布局变化后重算「视口顶部那条」，切走时只读 ref，不再碰已卸载的 DOM。
+      useEffect(() => {
+        const frame = requestAnimationFrame(captureAnchor)
+        return () => cancelAnimationFrame(frame)
+      }, [captureAnchor, data, expanded, originals, status])
 
       useEffect(() => () => {
         alive.current = false
         if (confirmTimer.current) clearTimeout(confirmTimer.current)
+        stashPageState(stashRef.current, anchorRef.current)
       }, [])
 
       const load = useCallback(async (quiet) => {
         if (!sessionId) return
         if (!quiet) setStatus(current => (current === 'ready' ? 'ready' : 'loading'))
+        const restore = restoreRef.current
+        const keepAnchor = scrolled.current ? anchorRef.current : null
+        const currentFirst = entriesRef.current[0]?.seq ?? null
+        const anchor = restore !== null ? restore.seq : currentFirst
         try {
-          const next = await requestJson(`/api/edit-page/v1/session?sessionId=${encodeURIComponent(sessionId)}`)
+          const tail = await requestJson(`/api/edit-page/v1/session?sessionId=${encodeURIComponent(sessionId)}&limit=${WINDOW}`)
+          let entries = tail.entries
+          let hasMore = tail.hasMore === true
+          let windows = 0
+          // 回到离开时的窗口范围：只补前面缺的那几页，不重读整段历史。
+          while (hasMore && anchor !== null && entries.length > 0 && entries[0].seq > anchor && windows < MAX_WINDOWS) {
+            let earlier
+            try {
+              earlier = await requestJson(`/api/edit-page/v1/session?sessionId=${encodeURIComponent(sessionId)}&limit=${WINDOW}&before=${entries[0].seq}`)
+            } catch (error) {
+              // 锚点被压缩/替换掉时退回末尾窗口，不把整页卡在错误上。
+              if (error.code === 'WINDOW_STALE') break
+              throw error
+            }
+            entries = [...earlier.entries, ...entries]
+            hasMore = earlier.hasMore === true
+            windows += 1
+          }
           if (!alive.current) return
-          setData(next)
+          restoreRef.current = null
+          setData({ ...tail, entries, hasMore })
           setFailure(null)
           setStatus('ready')
-          // 首次载入直接落到最新一条：编辑页不从头开始看。
-          if (!scrolled.current && next.entries.length > 0) {
+          const reached = restore !== null && anchor !== null
+            && entries.some(entry => entry.seq === anchor)
+          if (reached) {
+            pendingRestoreRef.current = { seq: anchor, offset: restore.offset }
             scrolled.current = true
-            const lastSeq = next.entries[next.entries.length - 1].seq
-            setPendingScroll(segmentEntries(next.entries).anchors.get(lastSeq) ?? lastSeq)
+          } else if (!scrolled.current && entries.length > 0) {
+            // 首次进入落到末尾回复的开头；之后刷新不再跳。
+            scrolled.current = true
+            setPendingStart(lastReplySeq(entries))
+          } else if (keepAnchor !== null && anchorRef.current?.seq === keepAnchor.seq
+            && entries.some(entry => entry.seq === keepAnchor.seq)) {
+            // 刷新/保存后的重读：用户没动过就停在原来那条上。
+            pendingRestoreRef.current = keepAnchor
           }
         } catch (error) {
           if (!alive.current) return
@@ -572,18 +741,55 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
+      const loadEarlier = useCallback(async () => {
+        if (busy || loadingEarlier) return
+        const currentFirst = entriesRef.current[0]?.seq
+        if (currentFirst === undefined) return
+        setLoadingEarlier(true)
+        try {
+          const earlier = await requestJson(`/api/edit-page/v1/session?sessionId=${encodeURIComponent(sessionId)}&limit=${WINDOW}&before=${currentFirst}`)
+          if (!alive.current) return
+          setData(current => {
+            if (current === null) return current
+            const known = new Set(current.entries.map(entry => entry.seq))
+            const fresh = earlier.entries.filter(entry => !known.has(entry.seq))
+            return {
+              ...current,
+              entries: [...fresh, ...current.entries],
+              hasMore: earlier.hasMore === true,
+            }
+          })
+        } catch (error) {
+          if (!alive.current) return
+          if (error.code === 'WINDOW_STALE') await load(false)
+          else setEntryError(error.message)
+        } finally {
+          if (alive.current) setLoadingEarlier(false)
+        }
+      }, [busy, loadingEarlier, load, sessionId])
+
       useEffect(() => {
+        if (sessionRef.current !== sessionId) {
+          stashPageState(stashRef.current, anchorRef.current)
+          sessionRef.current = sessionId
+          const next = sessionId ? pageStash.get(sessionId) : undefined
+          setDrafts(new Map(next?.drafts ?? []))
+          setCallDrafts(new Map(next?.callDrafts ?? []))
+          setExpanded(new Set(next?.expanded ?? []))
+          setOriginals(new Set(next?.originals ?? []))
+          restoreRef.current = next
+            ? { seq: next.anchorSeq ?? null, offset: next.anchorOffset ?? 0 }
+            : null
+          anchorRef.current = restoreRef.current
+          pendingRestoreRef.current = null
+          scrolled.current = false
+          setPendingStart(null)
+        }
         setData(null)
         setNotice(null)
         setEntryError(null)
-        setExpanded(new Set())
-        setOriginals(new Set())
-        setDrafts(new Map())
-        setCallDrafts(new Map())
         setBlockErrors(new Map())
-        setPendingScroll(null)
         setConfirmFork(null)
-        scrolled.current = false
         load(false)
       }, [sessionId, load])
 
@@ -622,14 +828,32 @@ window.__ModuleLoader__.load({
         })
       }, [data])
 
+      // 首次进入：把末尾回复的开头对齐到视口顶部，而不是从页首或页尾开始。
       useEffect(() => {
-        if (pendingScroll === null) return
-        const node = refs.current.get(pendingScroll)
+        if (pendingStart === null || data === null) return
+        const node = refs.current.get(anchors.get(pendingStart) ?? pendingStart)
         if (node && typeof node.scrollIntoView === 'function') {
-          node.scrollIntoView({ block: 'end' })
+          node.scrollIntoView({ block: 'start' })
         }
-        setPendingScroll(null)
-      }, [pendingScroll, data])
+        setPendingStart(null)
+      }, [pendingStart, data])
+
+      // 数据到齐后把暂存时视口顶部的那条对齐回顶部，再补回它当时的偏移。
+      useEffect(() => {
+        if (status !== 'ready' || data === null) return
+        const target = pendingRestoreRef.current
+        if (target === null) return
+        pendingRestoreRef.current = null
+        const node = refs.current.get(anchors.get(target.seq) ?? target.seq)
+        if (node === undefined) {
+          setPendingStart(lastReplySeq(entries))
+          return
+        }
+        if (typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'start' })
+        const port = scrollPortRef.current
+        if (port !== null) port.scrollTop -= target.offset
+        anchorRef.current = target
+      }, [status, data])
 
       useEffect(() => {
         const onFocus = () => { if (!busy) load(true) }
@@ -872,13 +1096,17 @@ window.__ModuleLoader__.load({
         return null
       }
 
-      return h('div', { style: S.root, 'data-edit-page': 'root' },
+      return h('div', {
+        ref: rootRef,
+        style: S.root,
+        'data-edit-page': 'root',
+      },
         h('div', { style: S.inner },
           h('div', { style: S.bar },
             h('span', { style: S.title }, LABEL),
             h('span', { style: S.hint }, '文字与思考可改，工具调用可改、结果只读'),
             h('span', { style: S.spacer }),
-            entries.length > 0 ? h('span', { style: S.meta }, `${entries.length} 条`) : null,
+            entries.length > 0 ? h('span', { style: S.meta }, `已载入 ${entries.length} 条`) : null,
             data?.running ? h('span', { style: { ...S.meta, color: 'var(--dsw-alias-state-warn-primary, #b8860b)' } }, '运行中') : null,
             h('button', { type: 'button', style: S.action, onClick: () => load(false) }, '刷新'),
             lastAssistant ? h('button', { type: 'button', style: S.action, onClick: () => jump(lastAssistant.seq) }, '最新 ↓') : null,
@@ -898,6 +1126,13 @@ window.__ModuleLoader__.load({
             : null,
           locked
             ? h('div', { style: S.noticeBar }, '模型正在运行，这一轮结束后才能保存修改。')
+            : null,
+          status === 'ready' && data?.hasMore === true
+            ? h('div', { style: S.loadEarlier },
+              h('button', {
+                type: 'button', style: S.action, disabled: loadingEarlier || busy,
+                onClick: loadEarlier,
+              }, loadingEarlier ? '载入更早…' : '↑ 加载更早的对话'))
             : null,
 
           entries.map((entry, index) => {
@@ -945,6 +1180,11 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        stashEnabled = true
+        ctx.effect(() => () => {
+          stashEnabled = false
+          pageStash.clear()
+        }, 'session-edit: page stash')
         try {
           openSession = typeof ctx.uiWorkspace?.openSession === 'function'
             ? ctx.uiWorkspace.openSession.bind(ctx.uiWorkspace)
